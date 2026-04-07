@@ -1,56 +1,17 @@
 """
-AI Interview Voice Bot - Streamlit Version
-No PyAudio required - uses browser microphone
-Optimized for 32-bit Windows
+AI Interview Voice Bot - Streamlit Cloud Ready
+Uses browser's built-in microphone (no PyAudio needed)
 """
 
 import streamlit as st
 import google.generativeai as genai
-from dotenv import load_dotenv
-import os
 import time
+import json
 from datetime import datetime
 
-# Load environment variables
-load_dotenv()
-
-# Configure Gemini API
-GEMINI_API_KEY = os.getenv('GEMINI_API_KEY')
-if not GEMINI_API_KEY:
-    st.error("❌ GEMINI_API_KEY not found in .env file")
-    st.info("""
-    **How to get your API Key:**
-    1. Go to: https://makersuite.google.com/app/apikey
-    2. Sign in with your Google account
-    3. Click 'Create API Key'
-    4. Copy the key and paste it in the `.env` file
-    """)
-    st.stop()
-
-try:
-    genai.configure(api_key=GEMINI_API_KEY)
-    model = genai.GenerativeModel('gemini-1.5-flash')
-except Exception as e:
-    st.error(f"Failed to configure Gemini API: {e}")
-    st.stop()
-
-# Initialize session state
-if 'questions' not in st.session_state:
-    st.session_state.questions = []
-if 'current_q' not in st.session_state:
-    st.session_state.current_q = 0
-if 'responses' not in st.session_state:
-    st.session_state.responses = []
-if 'feedback' not in st.session_state:
-    st.session_state.feedback = []
-if 'interview_started' not in st.session_state:
-    st.session_state.interview_started = False
-if 'recording_text' not in st.session_state:
-    st.session_state.recording_text = ""
-
-# Page config
+# Page configuration
 st.set_page_config(
-    page_title="AI Interview Voice Bot",
+    page_title="AI Interview Bot",
     page_icon="🎙️",
     layout="wide"
 )
@@ -79,12 +40,8 @@ st.markdown("""
         border-radius: 10px;
         margin: 1rem 0;
     }
-    .score-badge {
-        display: inline-block;
-        padding: 0.5rem 1rem;
-        border-radius: 20px;
-        font-weight: bold;
-        margin: 0.5rem 0;
+    .stTextArea textarea {
+        font-size: 1rem;
     }
 </style>
 """, unsafe_allow_html=True)
@@ -97,35 +54,79 @@ st.markdown("""
 </div>
 """, unsafe_allow_html=True)
 
-def generate_questions(profile):
-    """Generate interview questions based on profile"""
+# Initialize session state
+if 'model' not in st.session_state:
+    st.session_state.model = None
+if 'api_key_valid' not in st.session_state:
+    st.session_state.api_key_valid = False
+if 'questions' not in st.session_state:
+    st.session_state.questions = []
+if 'current_q' not in st.session_state:
+    st.session_state.current_q = 0
+if 'responses' not in st.session_state:
+    st.session_state.responses = []
+if 'feedback_list' not in st.session_state:
+    st.session_state.feedback_list = []
+if 'interview_started' not in st.session_state:
+    st.session_state.interview_started = False
+
+def validate_api_key(api_key):
+    """Validate Gemini API key"""
+    if not api_key or not api_key.strip():
+        return False, "Please enter an API key"
+    
+    if not api_key.startswith('AIza'):
+        return False, "API key should start with 'AIza'"
+    
+    try:
+        genai.configure(api_key=api_key.strip())
+        model = genai.GenerativeModel('gemini-1.5-flash')
+        response = model.generate_content("Say 'OK'")
+        
+        if response and response.text:
+            return True, "API key is valid!"
+        return False, "API key validation failed"
+        
+    except Exception as e:
+        error_msg = str(e)
+        if "API_KEY_INVALID" in error_msg:
+            return False, "Invalid API key. Please create a new one at https://makersuite.google.com/app/apikey"
+        elif "PERMISSION_DENIED" in error_msg:
+            return False, "Permission denied. Check your API key permissions."
+        else:
+            return False, f"Error: {error_msg[:100]}"
+
+def generate_questions(profile, model):
+    """Generate interview questions"""
     with st.spinner("🤖 Generating personalized questions..."):
         prompt = f"""
-        Candidate Profile: {profile}
+        Based on this profile: {profile[:500]}
         
         Generate exactly 5 behavioral interview questions for a technical role.
         Focus on: teamwork, problem-solving, communication, deadlines, and code reviews.
         
-        Return ONLY a Python list of 5 strings. Example: ["Q1?", "Q2?", "Q3?", "Q4?", "Q5?"]
+        Return ONLY a Python list of 5 strings.
+        Example: ["Question 1?", "Question 2?", "Question 3?", "Question 4?", "Question 5?"]
         """
         
         try:
             response = model.generate_content(prompt)
-            questions_text = response.text.strip()
+            text = response.text.strip()
             
-            # Parse the response
-            if '```' in questions_text:
-                questions_text = questions_text.split('```')[1]
-                if questions_text.startswith('python'):
-                    questions_text = questions_text[6:]
+            # Clean up the response
+            if '```' in text:
+                text = text.split('```')[1]
+                if text.startswith('python'):
+                    text = text[6:]
             
-            questions = eval(questions_text)
+            questions = eval(text)
             
             if len(questions) != 5:
                 questions = get_fallback_questions()
             
             return questions
-        except:
+        except Exception as e:
+            st.warning(f"Using fallback questions: {e}")
             return get_fallback_questions()
 
 def get_fallback_questions():
@@ -138,136 +139,149 @@ def get_fallback_questions():
         "How do you handle disagreements with team members about technical decisions?"
     ]
 
-def get_feedback(question, answer):
-    """Get AI feedback on answer"""
+def get_feedback(question, answer, model):
+    """Get AI feedback"""
     with st.spinner("🤖 Analyzing your answer..."):
         prompt = f"""
         Question: {question}
-        Candidate's Answer: {answer}
+        Answer: {answer}
         
         Evaluate using STAR method (Situation, Task, Action, Result).
         Return EXACTLY this format:
         
         Score: X/10
         Strengths: [one sentence]
-        Tips: [tip 1] | [tip 2]
+        Tips: [tip1] | [tip2]
         """
         
         try:
             response = model.generate_content(prompt)
-            feedback = response.text.strip()
-            return feedback
-        except:
-            return "Score: 7/10\nStrengths: Good attempt\nTips: Use specific examples | Structure with STAR method"
+            return response.text.strip()
+        except Exception as e:
+            return f"Score: 7/10\nStrengths: Good attempt\nTips: Use specific examples | Structure with STAR method"
 
-# Sidebar for profile setup
+# Sidebar
 with st.sidebar:
-    st.header("📝 Setup")
+    st.header("🔐 Setup")
     
-    if not st.session_state.interview_started:
-        profile = st.text_area(
-            "Your Profile",
-            placeholder="Example: Computer Science student, Python developer, worked on team projects, experienced with Agile methodology...",
-            height=150
-        )
+    # API Key input
+    api_key = st.text_input(
+        "Gemini API Key",
+        type="password",
+        placeholder="Enter your Gemini API key",
+        help="Get your free key from https://makersuite.google.com/app/apikey"
+    )
+    
+    if api_key:
+        if st.button("🔑 Validate Key", type="primary", use_container_width=True):
+            with st.spinner("Validating..."):
+                is_valid, message = validate_api_key(api_key)
+                if is_valid:
+                    st.session_state.api_key_valid = True
+                    st.session_state.model = genai.GenerativeModel('gemini-1.5-flash')
+                    genai.configure(api_key=api_key.strip())
+                    st.success(f"✅ {message}")
+                else:
+                    st.session_state.api_key_valid = False
+                    st.error(f"❌ {message}")
+    
+    if st.session_state.api_key_valid:
+        st.success("✅ API key ready!")
+        st.markdown("---")
+        st.header("📝 Your Profile")
         
-        if st.button("🎯 Start Interview", type="primary"):
-            if profile:
-                st.session_state.questions = generate_questions(profile)
-                st.session_state.interview_started = True
-                st.session_state.current_q = 0
-                st.session_state.responses = []
-                st.session_state.feedback = []
+        if not st.session_state.interview_started:
+            profile = st.text_area(
+                "Tell us about yourself",
+                height=150,
+                placeholder="Example: Computer Science student, Python developer, team projects, internship experience..."
+            )
+            
+            col1, col2 = st.columns(2)
+            with col1:
+                if st.button("🎯 Start Interview", type="primary", use_container_width=True):
+                    if profile:
+                        with st.spinner("Generating questions..."):
+                            st.session_state.questions = generate_questions(profile, st.session_state.model)
+                            st.session_state.interview_started = True
+                            st.session_state.current_q = 0
+                            st.session_state.responses = []
+                            st.session_state.feedback_list = []
+                            st.rerun()
+                    else:
+                        st.warning("Please enter your profile")
+            
+            with col2:
+                if st.button("📋 Load Example", use_container_width=True):
+                    example = "Computer Science student, 3rd year, proficient in Python and Java. Built 5 web applications. Led a team of 4 in a hackathon. Interned at a startup. Strong communication skills."
+                    st.session_state.example = example
+                    st.rerun()
+        
+        if st.session_state.interview_started:
+            if st.session_state.questions:
+                st.info(f"📋 Question {st.session_state.current_q + 1} of {len(st.session_state.questions)}")
+                progress = st.session_state.current_q / len(st.session_state.questions)
+                st.progress(progress)
+            
+            if st.button("🔄 Restart Interview", use_container_width=True):
+                for key in ['interview_started', 'questions', 'current_q', 'responses', 'feedback_list']:
+                    if key in st.session_state:
+                        del st.session_state[key]
                 st.rerun()
-            else:
-                st.warning("Please enter your profile first")
     
-    if st.session_state.interview_started:
-        st.info(f"📋 Question {st.session_state.current_q + 1} of {len(st.session_state.questions)}")
-        progress = (st.session_state.current_q) / len(st.session_state.questions) if st.session_state.questions else 0
-        st.progress(progress)
-        
-        if st.button("🔄 Restart Interview"):
-            for key in ['interview_started', 'questions', 'current_q', 'responses', 'feedback']:
-                if key in st.session_state:
-                    del st.session_state[key]
-            st.rerun()
+    # Help section
+    with st.expander("📖 How to get API key"):
+        st.markdown("""
+        1. Go to [Google AI Studio](https://makersuite.google.com/app/apikey)
+        2. Sign in with Google account
+        3. Click **Create API Key**
+        4. Copy the key (starts with `AIza...`)
+        5. Paste above and click Validate
+        """)
 
-# Main interview flow
-if st.session_state.interview_started and st.session_state.questions:
+# Main content
+if not st.session_state.api_key_valid:
+    st.info("🔐 **Get Started:** Enter your Gemini API key in the sidebar and click 'Validate Key'")
+    
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.markdown("""
+        ### 🎯 Features
+        - Personalized questions
+        - Voice recording
+        - AI feedback
+        - STAR evaluation
+        """)
+    with col2:
+        st.markdown("""
+        ### 🚀 Benefits
+        - Practice anytime
+        - Instant feedback
+        - Track progress
+        - Build confidence
+        """)
+    with col3:
+        st.markdown("""
+        ### 🔒 Privacy
+        - No data stored
+        - Your API key only
+        - Session only
+        """)
+
+elif st.session_state.interview_started and st.session_state.questions:
     current_idx = st.session_state.current_q
     
     if current_idx < len(st.session_state.questions):
-        # Display current question
-        current_question = st.session_state.questions[current_idx]
+        question = st.session_state.questions[current_idx]
         
         st.markdown(f"""
         <div class="question-box">
             <h3>Question {current_idx + 1} of {len(st.session_state.questions)}</h3>
-            <p style="font-size: 1.2rem;">{current_question}</p>
+            <p style="font-size: 1.2rem;">{question}</p>
         </div>
         """, unsafe_allow_html=True)
         
-        # Audio recording using browser's microphone (no PyAudio needed)
-        st.markdown("### 🎤 Record Your Answer")
-        
-        # Use Streamlit's audio input
-        audio_value = st.audio_input("Click to record your answer", key=f"audio_{current_idx}")
-        
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            if st.button("⏺️ Record Answer", type="primary", use_container_width=True):
-                st.info("🎙️ Please speak clearly into your microphone for 15-20 seconds")
-                st.info("After recording, click 'Submit Answer'")
-        
-        with col2:
-            if st.button("📝 Submit Answer", type="secondary", use_container_width=True):
-                if audio_value:
-                    # Save audio temporarily
-                    temp_audio = f"temp_audio_{current_idx}.wav"
-                    with open(temp_audio, "wb") as f:
-                        f.write(audio_value.getbuffer())
-                    
-                    # Transcribe using speech recognition
-                    import speech_recognition as sr
-                    recognizer = sr.Recognizer()
-                    
-                    with st.spinner("📝 Transcribing your answer..."):
-                        try:
-                            with sr.AudioFile(temp_audio) as source:
-                                audio = recognizer.record(source)
-                                transcript = recognizer.recognize_google(audio)
-                            
-                            st.success(f"✅ Transcribed: {transcript}")
-                            
-                            # Get feedback
-                            feedback = get_feedback(current_question, transcript)
-                            
-                            # Store response
-                            st.session_state.responses.append({
-                                'question': current_question,
-                                'answer': transcript
-                            })
-                            st.session_state.feedback.append(feedback)
-                            
-                            # Move to next question
-                            st.session_state.current_q += 1
-                            
-                            # Clean up
-                            os.remove(temp_audio)
-                            
-                            st.rerun()
-                            
-                        except sr.UnknownValueError:
-                            st.error("❌ Could not understand audio. Please speak clearly and try again.")
-                        except Exception as e:
-                            st.error(f"❌ Error processing audio: {e}")
-                else:
-                    st.warning("Please record your answer first")
-        
-        # Display recording tips
-        with st.expander("💡 Tips for a good answer"):
+        with st.expander("💡 Answering Tips"):
             st.markdown("""
             **Use the STAR method:**
             - **S**ituation: Set the context
@@ -275,27 +289,60 @@ if st.session_state.interview_started and st.session_state.questions:
             - **A**ction: Explain what you did
             - **R**esult: Share the outcome
             
-            **Speak clearly** and at a moderate pace
-            **Keep answers** between 30-60 seconds
-            **Be specific** with examples
+            **Tips:**
+            - Speak clearly and at moderate pace
+            - Keep answers between 30-60 seconds
+            - Use specific examples and numbers
             """)
+        
+        # Text input for answer (instead of voice - more reliable for deployment)
+        st.markdown("### 📝 Your Answer")
+        answer_text = st.text_area(
+            "Type or paste your answer here",
+            height=150,
+            placeholder="Type your answer to the question above...",
+            key=f"answer_{current_idx}"
+        )
+        
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            if st.button("🎙️ Voice Input (Coming Soon)", disabled=True, use_container_width=True):
+                st.info("Voice input is being optimized for cloud deployment. Please use text input for now.")
+        
+        with col2:
+            if st.button("📝 Submit Answer", type="primary", use_container_width=True):
+                if answer_text.strip():
+                    with st.spinner("Analyzing your answer..."):
+                        feedback = get_feedback(question, answer_text, st.session_state.model)
+                        
+                        st.session_state.responses.append({
+                            'question': question,
+                            'answer': answer_text,
+                            'timestamp': datetime.now().strftime("%H:%M:%S")
+                        })
+                        st.session_state.feedback_list.append(feedback)
+                        st.session_state.current_q += 1
+                        st.rerun()
+                else:
+                    st.warning("Please enter your answer before submitting")
     
     else:
-        # Interview completed - show summary
+        # Interview completed
+        st.balloons()
         st.success("🎉 Congratulations! You've completed the interview!")
         
-        st.header("📊 Interview Summary")
+        st.header("📊 Your Interview Summary")
         
         total_score = 0
         score_count = 0
         
-        for idx, (response, feedback) in enumerate(zip(st.session_state.responses, st.session_state.feedback), 1):
+        for idx, (response, feedback) in enumerate(zip(st.session_state.responses, st.session_state.feedback_list), 1):
             with st.expander(f"Question {idx}: {response['question'][:100]}..."):
                 st.markdown(f"**Your Answer:** {response['answer']}")
                 st.markdown("---")
-                st.markdown("**Feedback:**")
+                st.markdown("**🤖 AI Feedback:**")
                 
-                # Parse feedback
                 lines = feedback.split('\n')
                 for line in lines:
                     if 'Score:' in line:
@@ -311,7 +358,8 @@ if st.session_state.interview_started and st.session_state.questions:
                     elif 'Tips:' in line:
                         st.markdown(f"💡 {line}")
                     else:
-                        st.markdown(line)
+                        if line.strip():
+                            st.markdown(line)
         
         if score_count > 0:
             avg_score = total_score / score_count
@@ -319,40 +367,24 @@ if st.session_state.interview_started and st.session_state.questions:
             <div class="feedback-box">
                 <h3>📈 Overall Performance</h3>
                 <p>Average Score: <strong>{avg_score:.1f}/10</strong></p>
-                <p>Keep practicing to improve your scores!</p>
+                <p>💪 Keep practicing to improve your scores!</p>
             </div>
             """, unsafe_allow_html=True)
         
-        if st.button("🔄 Start New Interview", type="primary"):
-            for key in ['interview_started', 'questions', 'current_q', 'responses', 'feedback']:
+        if st.button("🔄 Start New Interview", type="primary", use_container_width=True):
+            for key in ['interview_started', 'questions', 'current_q', 'responses', 'feedback_list']:
                 if key in st.session_state:
                     del st.session_state[key]
             st.rerun()
 
 else:
-    # Welcome screen
-    st.markdown("""
-    ### 🎯 Welcome to AI Interview Voice Bot!
-    
-    **How it works:**
-    1. 📝 Enter your profile in the sidebar
-    2. 🎯 AI generates 5 personalized questions
-    3. 🎤 Record your answers using your microphone
-    4. 🤖 Get instant feedback with scores and tips
-    5. 📊 Review your performance summary
-    
-    **Perfect for:**
-    - Job interview preparation
-    - Practicing behavioral questions
-    - Improving communication skills
-    - Building interview confidence
-    
-    ### 🚀 Get Started
-    Enter your profile in the left sidebar and click "Start Interview"!
-    """)
-    
-    st.info("💡 **Tip:** The more detailed your profile, the better the questions will be!")
+    if st.session_state.api_key_valid:
+        st.info("📝 **Ready to start!** Enter your profile in the sidebar and click 'Start Interview'")
 
 # Footer
 st.markdown("---")
-st.markdown("🎙️ AI Interview Voice Bot | Powered by Google Gemini AI")
+st.markdown("""
+<div style="text-align: center; color: gray; font-size: 0.8rem;">
+    🎙️ AI Interview Voice Bot | Powered by Google Gemini AI
+</div>
+""", unsafe_allow_html=True)
